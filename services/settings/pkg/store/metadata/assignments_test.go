@@ -10,6 +10,7 @@ import (
 	"github.com/opencloud-eu/opencloud/pkg/shared"
 	settingsmsg "github.com/opencloud-eu/opencloud/protogen/gen/opencloud/messages/settings/v0"
 	"github.com/opencloud-eu/opencloud/services/settings/pkg/config/defaults"
+	"github.com/opencloud-eu/opencloud/services/settings/pkg/settings"
 	"github.com/stretchr/testify/require"
 )
 
@@ -110,18 +111,66 @@ func setupRoles(s *Store) {
 	}
 }
 
+var (
+	roleA = bundles[0].Id // "f36db5e6-..." TEST_ROLE
+	roleB = bundles[1].Id // "44f1a664-..." ANOTHER_TEST_ROLE
+
+	// alanPrefixed shares alan's id as a prefix, to catch path matching without a "/" boundary.
+	alanPrefixed = alan + "0"
+)
+
+type roleWrite struct {
+	userID string
+	roleID string
+}
+
+// requireSingleAssignment checks the "Each user can have exactly one role" contract
+// (assignments.go:122) both through the API and directly in storage.
+func requireSingleAssignment(t *testing.T, s *Store, userID, roleID string) *settingsmsg.UserRoleAssignment {
+	t.Helper()
+	list, err := s.ListRoleAssignments(userID)
+	require.NoError(t, err)
+	require.Len(t, list, 1, "user %s must have exactly one role assignment", userID)
+	require.Equal(t, roleID, list[0].RoleId)
+	require.Equal(t, userID, list[0].AccountUuid)
+
+	m := mockOf(t, s)
+	files := m.Files(accountPath(userID))
+	require.Equal(t, []string{assignmentPath(userID, list[0].Id)}, files,
+		"storage must hold exactly one assignment file for %s", userID)
+	return list[0]
+}
+
 func TestAssignmentUniqueness(t *testing.T) {
 	var scenarios = []struct {
-		name       string
-		userID     string
-		firstRole  string
-		secondRole string
+		name   string
+		writes []roleWrite
+		want   map[string]string // userID -> the one role they must end up with
 	}{
 		{
-			"roles assignments",
-			alan,
-			"f36db5e6-a03c-40df-8413-711c67e40b47",
-			"44f1a664-0a7f-461a-b0be-5b59e46bbc7a",
+			name:   "roles assignments",
+			writes: []roleWrite{{alan, roleA}, {alan, roleB}},
+			want:   map[string]string{alan: roleB},
+		},
+		{
+			name:   "same role twice",
+			writes: []roleWrite{{alan, roleA}, {alan, roleA}},
+			want:   map[string]string{alan: roleA},
+		},
+		{
+			name:   "three writes in a row",
+			writes: []roleWrite{{alan, roleA}, {alan, roleB}, {alan, roleA}},
+			want:   map[string]string{alan: roleA},
+		},
+		{
+			name:   "two users do not affect each other",
+			writes: []roleWrite{{alan, roleA}, {mary, roleB}, {alan, roleB}, {mary, roleA}},
+			want:   map[string]string{alan: roleB, mary: roleA},
+		},
+		{
+			name:   "account ids sharing a prefix do not affect each other",
+			writes: []roleWrite{{alan, roleA}, {alanPrefixed, roleB}, {alan, roleB}},
+			want:   map[string]string{alan: roleB, alanPrefixed: roleB},
 		},
 	}
 
@@ -129,86 +178,79 @@ func TestAssignmentUniqueness(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			s := initStore()
 			setupRoles(s)
-			firstAssignment, err := s.WriteRoleAssignment(scenario.userID, scenario.firstRole)
-			require.NoError(t, err)
-			require.Equal(t, firstAssignment.RoleId, scenario.firstRole)
-			// TODO: check entry exists
 
-			list, err := s.ListRoleAssignments(scenario.userID)
-			require.NoError(t, err)
-			require.Equal(t, 1, len(list))
-			require.Equal(t, list[0].RoleId, scenario.firstRole)
+			last := map[string]*settingsmsg.UserRoleAssignment{}
+			seenIDs := map[string]bool{}
+			for _, w := range scenario.writes {
+				a, err := s.WriteRoleAssignment(w.userID, w.roleID)
+				require.NoError(t, err)
+				require.Equal(t, w.roleID, a.RoleId)
+				require.Equal(t, w.userID, a.AccountUuid)
+				require.NotEmpty(t, a.Id)
+				// F2: every write produces a new assignment id
+				require.False(t, seenIDs[a.Id], "assignment id %s was reused", a.Id)
+				seenIDs[a.Id] = true
+				last[w.userID] = a
+			}
 
-			// creating another assignment shouldn't add another entry, as we support max one role per user.
-			// assigning the second role should remove the old
-			secondAssignment, err := s.WriteRoleAssignment(scenario.userID, scenario.secondRole)
-			require.NoError(t, err)
-			require.Equal(t, secondAssignment.RoleId, scenario.secondRole)
-
-			list, err = s.ListRoleAssignments(scenario.userID)
-			require.NoError(t, err)
-			require.Equal(t, 1, len(list))
-			require.Equal(t, list[0].RoleId, scenario.secondRole)
+			for userID, roleID := range scenario.want {
+				got := requireSingleAssignment(t, s, userID, roleID)
+				// the surviving assignment is the one returned by the last write
+				require.Equal(t, last[userID].Id, got.Id)
+			}
 		})
 	}
 }
 
 func TestListRoleAssignmentByRole(t *testing.T) {
-	type assignment struct {
-		userID string
-		roleID string
-	}
-
 	var scenarios = []struct {
-		name        string
-		assignments []assignment
-		queryRole   string
-		numResults  int
+		name         string
+		assignments  []roleWrite
+		queryRole    string
+		wantAccounts []string
 	}{
 		{
-			name: "just 2 assignments",
-			assignments: []assignment{
-				{
-					userID: alan,
-					roleID: role1,
-				}, {
-					userID: mary,
-					roleID: role1,
-				},
-			},
-			queryRole:  role1,
-			numResults: 2,
+			name:         "just 2 assignments",
+			assignments:  []roleWrite{{alan, role1}, {mary, role1}},
+			queryRole:    role1,
+			wantAccounts: []string{alan, mary},
 		},
 		{
-			name: "no assignments match",
-			assignments: []assignment{
-				{
-					userID: alan,
-					roleID: role1,
-				}, {
-					userID: mary,
-					roleID: role1,
-				},
-			},
-			queryRole:  role2,
-			numResults: 0,
+			name:         "no assignments match",
+			assignments:  []roleWrite{{alan, role1}, {mary, role1}},
+			queryRole:    role2,
+			wantAccounts: []string{},
 		},
 		{
-			name: "only one assignment matches",
-			assignments: []assignment{
-				{
-					userID: alan,
-					roleID: role1,
-				}, {
-					userID: mary,
-					roleID: role1,
-				}, {
-					userID: dennis,
-					roleID: role2,
-				},
-			},
-			queryRole:  role2,
-			numResults: 1,
+			// F5: exactly the matching accounts, no more, no fewer
+			name:         "by-role completeness",
+			assignments:  []roleWrite{{alan, role1}, {mary, role2}, {dennis, role1}},
+			queryRole:    role1,
+			wantAccounts: []string{alan, dennis},
+		},
+		{
+			name:         "only one assignment matches",
+			assignments:  []roleWrite{{alan, role1}, {mary, role1}, {dennis, role2}},
+			queryRole:    role2,
+			wantAccounts: []string{dennis},
+		},
+		{
+			name:         "reassigned user no longer matches the old role",
+			assignments:  []roleWrite{{alan, role1}, {mary, role1}, {alan, role2}},
+			queryRole:    role1,
+			wantAccounts: []string{mary},
+		},
+		{
+			name:         "reassigned user matches the new role",
+			assignments:  []roleWrite{{alan, role1}, {mary, role1}, {alan, role2}},
+			queryRole:    role2,
+			wantAccounts: []string{alan},
+		},
+		{
+			name:         "account ids sharing a prefix",
+			assignments:  []roleWrite{{alan, role1}, {alanPrefixed, role2}},
+			queryRole:    role1,
+			wantAccounts: []string{alan},
 		},
 	}
 
@@ -224,10 +266,12 @@ func TestListRoleAssignmentByRole(t *testing.T) {
 
 			list, err := s.ListRoleAssignmentsByRole(scenario.queryRole)
 			require.NoError(t, err)
-			require.Equal(t, scenario.numResults, len(list))
+			gotAccounts := make([]string, 0, len(list))
 			for _, ass := range list {
-				require.Equal(t, ass.RoleId, scenario.queryRole)
+				require.Equal(t, scenario.queryRole, ass.RoleId)
+				gotAccounts = append(gotAccounts, ass.AccountUuid)
 			}
+			require.ElementsMatch(t, scenario.wantAccounts, gotAccounts)
 		})
 	}
 }
@@ -238,12 +282,28 @@ func TestDeleteAssignment(t *testing.T) {
 		userID     string
 		firstRole  string
 		secondRole string
+		// bystander gets an assignment too; removing userID's must leave it intact
+		bystander string
 	}{
 		{
-			"roles assignments",
-			alan,
-			"f36db5e6-a03c-40df-8413-711c67e40b47",
-			"44f1a664-0a7f-461a-b0be-5b59e46bbc7a",
+			name:       "roles assignments",
+			userID:     alan,
+			firstRole:  "f36db5e6-a03c-40df-8413-711c67e40b47",
+			secondRole: "44f1a664-0a7f-461a-b0be-5b59e46bbc7a",
+		},
+		{
+			name:       "removing alan's assignment leaves mary's intact",
+			userID:     alan,
+			firstRole:  roleA,
+			secondRole: roleB,
+			bystander:  mary,
+		},
+		{
+			name:       "removing alan's assignment leaves a prefix-sharing account intact",
+			userID:     alan,
+			firstRole:  roleA,
+			secondRole: roleB,
+			bystander:  alanPrefixed,
 		},
 	}
 
@@ -251,11 +311,19 @@ func TestDeleteAssignment(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			s := initStore()
 			setupRoles(s)
+			m := mockOf(t, s)
+
+			var bystanderAssignment *settingsmsg.UserRoleAssignment
+			if scenario.bystander != "" {
+				var err error
+				bystanderAssignment, err = s.WriteRoleAssignment(scenario.bystander, scenario.secondRole)
+				require.NoError(t, err)
+			}
+
 			assignment, err := s.WriteRoleAssignment(scenario.userID, scenario.firstRole)
 			require.NoError(t, err)
 			require.Equal(t, assignment.RoleId, scenario.firstRole)
-			// TODO: uncomment
-			// require.True(t, mdc.IDExists(assignment.RoleId))
+			require.True(t, m.IDExists(assignmentPath(scenario.userID, assignment.Id)))
 
 			list, err := s.ListRoleAssignments(scenario.userID)
 			require.NoError(t, err)
@@ -264,16 +332,19 @@ func TestDeleteAssignment(t *testing.T) {
 
 			err = s.RemoveRoleAssignment(assignment.Id)
 			require.NoError(t, err)
-			// TODO: uncomment
-			// require.False(t, mdc.IDExists(assignment.RoleId))
+			require.False(t, m.IDExists(assignmentPath(scenario.userID, assignment.Id)))
 
 			list, err = s.ListRoleAssignments(scenario.userID)
 			require.NoError(t, err)
 			require.Equal(t, 0, len(list))
 
 			err = s.RemoveRoleAssignment(assignment.Id)
-			require.Error(t, err)
-			// TODO: do we want a custom error message?
+			require.ErrorIs(t, err, settings.ErrNotFound)
+
+			if bystanderAssignment != nil {
+				got := requireSingleAssignment(t, s, scenario.bystander, scenario.secondRole)
+				require.Equal(t, bystanderAssignment.Id, got.Id)
+			}
 		})
 	}
 }
