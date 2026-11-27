@@ -2,11 +2,11 @@ package store
 
 // Role-assignment and permission store (metadata.Store) — component test suite.
 //
-// Each test is tagged with its test-case id (TC-01 … TC-10) in its name and doc
+// Each test is tagged with its test-case id (TC-STORE-01 … TC-STORE-10) in its name and doc
 // comment. The cases are derived from the contract in "OpenCloud Settings Store —
 // Operation Contracts" (clause ids in brackets). Doubles live in rap_doubles_test.go.
 //
-// Run: ./run-tests.sh   (repo root)  or   go test -run 'TestTC' -v .
+// Run: ./run-tests.sh   (repo root)  or   go test -run 'TestTC_STORE_' -v .
 
 import (
 	"errors"
@@ -59,9 +59,9 @@ func roles(t *testing.T, s *Store, account string) []string {
 	return out
 }
 
-// TC-01 · ListRoleAssignments · equivalence partitioning of accountUUID [LA-3, LA-5]
+// TC-STORE-01 · ListRoleAssignments · equivalence partitioning of accountUUID [LA-3, LA-5]
 // P1 account with a stored role, P2 account never assigned, P3 service account.
-func TestTC01_ListRoleAssignments_EquivalencePartitions(t *testing.T) {
+func TestTC_STORE_01_ListRoleAssignments_EquivalencePartitions(t *testing.T) {
 	spy := &spyMDC{next: newFakeMDC()}
 	s := newStoreWith(t, spy, rapService)
 	stored := write(t, s, rapAlice, roleUser)
@@ -90,10 +90,10 @@ func TestTC01_ListRoleAssignments_EquivalencePartitions(t *testing.T) {
 	})
 }
 
-// TC-02 · WriteRoleAssignment · boundary value: accountUUID of length 0 [W-1, I1]
+// TC-STORE-02 · WriteRoleAssignment · boundary value: accountUUID of length 0 [W-1, I1]
 // Expected: the empty id is rejected and every other account keeps its role.
 // Known defect: the store deletes settings/accounts/ and reports success.
-func TestTC02_WriteRoleAssignment_EmptyAccountID(t *testing.T) {
+func TestTC_STORE_02_WriteRoleAssignment_EmptyAccountID(t *testing.T) {
 	spy := &spyMDC{next: newFakeMDC()}
 	s := newStoreWith(t, spy)
 	write(t, s, rapAlice, roleUser)
@@ -112,9 +112,9 @@ func TestTC02_WriteRoleAssignment_EmptyAccountID(t *testing.T) {
 	assert.Equal(t, []string{roleAdmin}, roles(t, s, rapBob), "Bob must keep his role")
 }
 
-// TC-03 · WriteRoleAssignment · boundary value: accountUUID of length 1, next to a
+// TC-STORE-03 · WriteRoleAssignment · boundary value: accountUUID of length 1, next to a
 // prefix-sharing account [W-6, W-9]
-func TestTC03_WriteRoleAssignment_OneCharAccountID(t *testing.T) {
+func TestTC_STORE_03_WriteRoleAssignment_OneCharAccountID(t *testing.T) {
 	s := newStoreWith(t, newFakeMDC())
 	write(t, s, "ab", roleAdmin)
 
@@ -125,9 +125,9 @@ func TestTC03_WriteRoleAssignment_OneCharAccountID(t *testing.T) {
 	assert.Equal(t, []string{roleAdmin}, roles(t, s, "ab"), "prefix-sharing account must be untouched")
 }
 
-// TC-04 · Write/Remove/List · state transition, valid path [I1, W-6, R-3]
+// TC-STORE-04 · Write/Remove/List · state transition, valid path [I1, W-6, R-3]
 // NoRole --Write(Admin)--> Role(Admin) --Write(User)--> Role(User) --Remove(id)--> NoRole
-func TestTC04_RoleLifecycle_StateTransitions(t *testing.T) {
+func TestTC_STORE_04_RoleLifecycle_StateTransitions(t *testing.T) {
 	seededUUIDs(t)
 	s := newStoreWith(t, newFakeMDC())
 
@@ -144,9 +144,9 @@ func TestTC04_RoleLifecycle_StateTransitions(t *testing.T) {
 	assert.Empty(t, roles(t, s, rapAlice), "S3 NoRole")
 }
 
-// TC-05 · RemoveRoleAssignment · state transition, invalid events [R-1, R-6]
+// TC-STORE-05 · RemoveRoleAssignment · state transition, invalid events [R-1, R-6]
 // Remove of an unknown id, and of a stale id that a later write replaced.
-func TestTC05_RemoveRoleAssignment_InvalidTransitions(t *testing.T) {
+func TestTC_STORE_05_RemoveRoleAssignment_InvalidTransitions(t *testing.T) {
 	s := newStoreWith(t, newFakeMDC())
 	stale := write(t, s, rapAlice, roleAdmin)
 	write(t, s, rapAlice, roleUser)
@@ -163,9 +163,9 @@ func TestTC05_RemoveRoleAssignment_InvalidTransitions(t *testing.T) {
 	}
 }
 
-// TC-06 · WriteRoleAssignment · exceptional: Delete fails [W-12]
+// TC-STORE-06 · WriteRoleAssignment · exceptional: Delete fails [W-12]
 // Mock: Delete is expected once; MakeDirIfNotExist and SimpleUpload must not be called.
-func TestTC06_WriteRoleAssignment_DeleteFails(t *testing.T) {
+func TestTC_STORE_06_WriteRoleAssignment_DeleteFails(t *testing.T) {
 	m := &mockMDC{}
 	m.On("Delete", accountPath(rapAlice)).Return(errors.New("storage unavailable")).Once()
 	s := newStoreWith(t, m)
@@ -179,9 +179,9 @@ func TestTC06_WriteRoleAssignment_DeleteFails(t *testing.T) {
 	m.AssertNotCalled(t, "SimpleUpload", mock.Anything, mock.Anything)
 }
 
-// TC-07 · WriteRoleAssignment · exceptional: upload fails after the delete [W-13]
+// TC-STORE-07 · WriteRoleAssignment · exceptional: upload fails after the delete [W-13]
 // Stub: every SimpleUpload returns a canned error.
-func TestTC07_WriteRoleAssignment_UploadFails(t *testing.T) {
+func TestTC_STORE_07_WriteRoleAssignment_UploadFails(t *testing.T) {
 	fake := newFakeMDC()
 	write(t, newStoreWith(t, fake), rapAlice, roleAdmin)
 	s := newStoreWith(t, &stubMDC{next: fake, op: "SimpleUpload", err: errors.New("quota exceeded")})
@@ -193,10 +193,10 @@ func TestTC07_WriteRoleAssignment_UploadFails(t *testing.T) {
 	assert.Empty(t, roles(t, s, rapAlice), "old role already deleted: account left with zero roles")
 }
 
-// TC-08 · ListRoleAssignmentsByRole · exceptional: one account folder vanishes [LB-2, LB-6]
+// TC-STORE-08 · ListRoleAssignmentsByRole · exceptional: one account folder vanishes [LB-2, LB-6]
 // Stub: ReadDir of Bob's folder answers NotFound (deleted between the two reads).
 // Expected: Alice and Carol are still listed. Known defect: the result is empty.
-func TestTC08_ListRoleAssignmentsByRole_OneFolderVanishes(t *testing.T) {
+func TestTC_STORE_08_ListRoleAssignmentsByRole_OneFolderVanishes(t *testing.T) {
 	fake := newFakeMDC()
 	seed := newStoreWith(t, fake)
 	write(t, seed, rapAlice, roleUser)
@@ -214,8 +214,8 @@ func TestTC08_ListRoleAssignmentsByRole_OneFolderVanishes(t *testing.T) {
 	assert.ElementsMatch(t, []string{rapAlice, rapCarol}, accounts)
 }
 
-// TC-09 · ReadPermissionByName · decision table [PN-1, PN-3, P-4]
-func TestTC09_ReadPermissionByName_DecisionTable(t *testing.T) {
+// TC-STORE-09 · ReadPermissionByName · decision table [PN-1, PN-3, P-4]
+func TestTC_STORE_09_ReadPermissionByName_DecisionTable(t *testing.T) {
 	const (
 		perm       = "Drives.Create"
 		roleWith   = "11111111-0000-4000-8000-000000000001"
@@ -268,9 +268,9 @@ func TestTC09_ReadPermissionByName_DecisionTable(t *testing.T) {
 	}
 }
 
-// TC-10 · initMetadataClient · admin bootstrap [IN-7, I6]
+// TC-STORE-10 · initMetadataClient · admin bootstrap [IN-7, I6]
 // The configured admin holds the User role before init; afterwards it holds only Admin.
-func TestTC10_Init_AdminBootstrap(t *testing.T) {
+func TestTC_STORE_10_Init_AdminBootstrap(t *testing.T) {
 	fake := newFakeMDC()
 	write(t, newStoreWith(t, fake), rapAdmin, roleUser)
 	s := &Store{

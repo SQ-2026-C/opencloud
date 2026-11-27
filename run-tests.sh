@@ -4,7 +4,7 @@
 #
 # Add a suite per tier as:  "tier|component|go package|test-name regex"
 SUITES=(
-  "data|Role-assignment & permission store|./services/settings/pkg/store/metadata|^TestTC"
+  "data|Role-assignment & permission store|./services/settings/pkg/store/metadata|^TestTC_STORE_"
 )
 
 set -u
@@ -31,8 +31,8 @@ for line in sys.stdin:
         tests[t] = a
 passed = failed = 0
 for t in sorted(tests):
-    m = re.match(r"TestTC(\d+)_(.*)", t)
-    tid, name = ("TC-" + m.group(1), m.group(2)) if m else ("-", t)
+    m = re.match(r"TestTC_([A-Z]+)_(\d+)_(.*)", t)
+    tid, name = (f"TC-{m.group(1)}-{m.group(2)}", m.group(3)) if m else ("-", t)
     v = tests[t]
     colour = {"pass": "32", "fail": "31"}.get(v, "33")
     print(f"  \033[{colour}m{v.upper():4}\033[0m  {tid}  {name}")
