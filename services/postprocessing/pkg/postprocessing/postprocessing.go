@@ -27,6 +27,32 @@ type Postprocessing struct {
 	StartTime         time.Time
 
 	config config.Postprocessing
+	clock  Clock
+}
+
+// Clock is the source of time used by the postprocessing. It exists so the waiting done by
+// Delay can be replaced in tests.
+type Clock interface {
+	Sleep(d time.Duration)
+}
+
+type realClock struct{}
+
+func (realClock) Sleep(d time.Duration) { time.Sleep(d) }
+
+// WithClock sets the clock used by the postprocessing and returns it.
+func (pp *Postprocessing) WithClock(c Clock) *Postprocessing {
+	pp.clock = c
+	return pp
+}
+
+// getClock returns the configured clock. Instances are also built as struct literals and
+// unmarshaled from the store, so a missing clock falls back to the real one.
+func (pp *Postprocessing) getClock() Clock {
+	if pp.clock == nil {
+		return realClock{}
+	}
+	return pp.clock
 }
 
 // Status is helper struct to show current postprocessing status
@@ -78,8 +104,9 @@ func (pp *Postprocessing) CurrentStep() any {
 // Delay will sleep the configured time then continue
 func (pp *Postprocessing) Delay(f func(next any)) {
 	next := pp.next(events.PPStepDelay)
+	clock := pp.getClock()
 	go func() {
-		time.Sleep(pp.config.Delayprocessing)
+		clock.Sleep(pp.config.Delayprocessing)
 		f(next)
 	}()
 }
