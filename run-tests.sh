@@ -40,7 +40,7 @@ for t in sorted(tests):
         failed += 1
         for l in out.get(t, []):
             l = l.strip()
-            if l.startswith(("Error:", "Messages:")) or "store called" in l:
+            if l.startswith(("Error:", "Messages:", "expected:", "actual  :")) or "store called" in l:
                 print("          " + re.sub(r"\s+", " ", l)[:110])
     elif v == "pass":
         passed += 1
