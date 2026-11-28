@@ -107,13 +107,15 @@ func TestTC_STORE_02_WriteRoleAssignment_EmptyAccountID(t *testing.T) {
 	assert.Equal(t, []string{roleAdmin}, roles(t, s, rapBob), "Bob must keep his role")
 }
 
-// TC-STORE-03 · Write/Remove/List · state transition, valid path [I1, W-6, R-3]
+// TC-STORE-03 · Write/Remove/List · state transitions, valid path and invalid events [I1, W-6, R-3, R-6]
 // NoRole --Write(Admin)--> Role(Admin) --Write(User)--> Role(User) --Remove(id)--> NoRole
+// Invalid events: Remove in S0 (no accounts folder yet) and Remove of the same id again in S3.
 func TestTC_STORE_03_RoleLifecycle_StateTransitions(t *testing.T) {
 	seededUUIDs(t)
 	s := newStoreWith(t, newFakeMDC())
 
 	assert.Empty(t, roles(t, s, rapAlice), "S0 NoRole")
+	assert.ErrorIs(t, s.RemoveRoleAssignment(uuid.NewString()), settings.ErrNotFound, "S0: nothing to remove")
 
 	a1 := write(t, s, rapAlice, roleAdmin)
 	assert.Equal(t, []string{roleAdmin}, roles(t, s, rapAlice), "S1 Role(Admin)")
@@ -124,11 +126,13 @@ func TestTC_STORE_03_RoleLifecycle_StateTransitions(t *testing.T) {
 
 	require.NoError(t, s.RemoveRoleAssignment(a2.GetId()))
 	assert.Empty(t, roles(t, s, rapAlice), "S3 NoRole")
+	assert.ErrorIs(t, s.RemoveRoleAssignment(a2.GetId()), settings.ErrNotFound, "S3: the id is already gone")
 }
 
 // TC-STORE-04 · ListRoleAssignmentsByRole · exceptional: one account folder vanishes [LB-2, LB-6]
 // Stub: ReadDir of Bob's folder answers NotFound (deleted between the two reads).
 // Expected: Alice and Carol are still listed. Known defect: the result is empty.
+// Also: no accounts folder yet gives an empty list, and any other storage error is returned.
 //
 // Strengthened after mutation testing: the defect makes the whole test fail, so on its own
 // it could not tell a mutant from the original (19 surviving mutants in this function).
@@ -144,6 +148,11 @@ func TestTC_STORE_04_ListRoleAssignmentsByRole_OneFolderVanishes(t *testing.T) {
 
 	t.Run("healthy_storage", func(t *testing.T) {
 		s := newStoreWith(t, newFakeMDC())
+		empty, err := s.ListRoleAssignmentsByRole(roleUser)
+		require.NoError(t, err, "no accounts folder yet")
+		assert.NotNil(t, empty)
+		assert.Empty(t, empty)
+
 		write(t, s, rapAlice, roleUser)
 		write(t, s, rapBob, roleAdmin)
 		write(t, s, rapCarol, roleUser)
@@ -170,6 +179,19 @@ func TestTC_STORE_04_ListRoleAssignmentsByRole_OneFolderVanishes(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []string{rapAlice, rapCarol}, accountsOf(got))
+	})
+
+	t.Run("one_folder_unreadable", func(t *testing.T) {
+		fake := newFakeMDC()
+		seed := newStoreWith(t, fake)
+		write(t, seed, rapAlice, roleUser)
+		write(t, seed, rapBob, roleUser)
+		s := newStoreWith(t, &stubMDC{next: fake, op: "ReadDir", path: accountPath(rapBob), err: errors.New("i/o timeout")})
+
+		got, err := s.ListRoleAssignmentsByRole(roleUser)
+
+		assert.Error(t, err, "a storage error other than NotFound is returned")
+		assert.Nil(t, got)
 	})
 }
 
