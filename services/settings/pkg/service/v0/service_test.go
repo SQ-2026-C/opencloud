@@ -2,12 +2,15 @@ package svc
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
 	"github.com/opencloud-eu/opencloud/pkg/middleware"
 	settingsmsg "github.com/opencloud-eu/opencloud/protogen/gen/opencloud/messages/settings/v0"
 	v0 "github.com/opencloud-eu/opencloud/protogen/gen/opencloud/services/settings/v0"
+	"github.com/opencloud-eu/opencloud/services/settings/pkg/settings"
 	"github.com/opencloud-eu/opencloud/services/settings/pkg/settings/mocks"
 	"github.com/opencloud-eu/opencloud/services/settings/pkg/store/defaults"
 	"github.com/stretchr/testify/assert"
@@ -83,6 +86,7 @@ func TestEditOwnRoleAssignment(t *testing.T) {
 	res := v0.AssignRoleToUserResponse{}
 	err := svc.AssignRoleToUser(ctxWithUUID, &req, &res)
 	assert.Nil(t, err)
+	manager.AssertCalled(t, "WriteRoleAssignment", req.AccountUuid, defaults.BundleUUIDRoleUser)
 
 	// Creating an initial self assignment is expected to succeed for UserLightRole when no assignment exists yet
 	req = v0.AssignRoleToUserRequest{
@@ -92,6 +96,7 @@ func TestEditOwnRoleAssignment(t *testing.T) {
 	res = v0.AssignRoleToUserResponse{}
 	err = svc.AssignRoleToUser(ctxWithUUID, &req, &res)
 	assert.Nil(t, err)
+	manager.AssertCalled(t, "WriteRoleAssignment", req.AccountUuid, defaults.BundleUUIDRoleUserLight)
 
 	// Creating an initial self assignment is expected to fail for non UserRole when no assignment exists yet
 	req = v0.AssignRoleToUserRequest{
@@ -101,6 +106,9 @@ func TestEditOwnRoleAssignment(t *testing.T) {
 	res = v0.AssignRoleToUserResponse{}
 	err = svc.AssignRoleToUser(ctxWithUUID, &req, &res)
 	assert.NotNil(t, err)
+	assertMicroErrorCode(t, err, http.StatusForbidden)
+	manager.AssertNotCalled(t, "WriteRoleAssignment", req.AccountUuid, defaults.BundleUUIDRoleAdmin)
+	manager.AssertNumberOfCalls(t, "WriteRoleAssignment", 2)
 
 	manager = &mocks.Manager{}
 	svc = Service{
@@ -128,6 +136,8 @@ func TestEditOwnRoleAssignment(t *testing.T) {
 	res = v0.AssignRoleToUserResponse{}
 	err = svc.AssignRoleToUser(ctxWithUUID, &req, &res)
 	assert.NotNil(t, err)
+	assertMicroErrorCode(t, err, http.StatusForbidden)
+	manager.AssertNotCalled(t, "WriteRoleAssignment", mock.Anything, mock.Anything)
 
 	manager.On("WriteRoleAssignment", mock.Anything, mock.Anything).Return(nil, nil)
 	// Creating an assignment for somebody else is expected to succeed, give the right permissions
@@ -138,6 +148,17 @@ func TestEditOwnRoleAssignment(t *testing.T) {
 	res = v0.AssignRoleToUserResponse{}
 	err = svc.AssignRoleToUser(ctxWithUUID, &req, &res)
 	assert.Nil(t, err)
+	manager.AssertCalled(t, "WriteRoleAssignment", "00000000-0000-0000-0000-000000000000", "aceb15b8-7486-479f-ae32-c91118e07a39")
+	manager.AssertNumberOfCalls(t, "WriteRoleAssignment", 1)
+}
+
+// assertMicroErrorCode checks the go-micro error code a handler returned.
+func assertMicroErrorCode(t *testing.T, err error, code int) {
+	t.Helper()
+	merr, ok := merrors.As(err)
+	if assert.True(t, ok, "expected a go-micro error, got %v", err) {
+		assert.Equal(t, int32(code), merr.Code)
+	}
 }
 
 func TestRemoveOwnRoleAssignment(t *testing.T) {
@@ -165,6 +186,8 @@ func TestRemoveOwnRoleAssignment(t *testing.T) {
 	}
 	err := svc.RemoveRoleFromUser(ctxWithUUID, &req, nil)
 	assert.NotNil(t, err)
+	assertMicroErrorCode(t, err, http.StatusForbidden)
+	manager.AssertNotCalled(t, "RemoveRoleAssignment", mock.Anything)
 
 	manager = &mocks.Manager{}
 	manager.On("ListRoleAssignments", mock.Anything).Return(nil, nil)
@@ -179,6 +202,8 @@ func TestRemoveOwnRoleAssignment(t *testing.T) {
 	}
 	err = svc.RemoveRoleFromUser(ctxWithUUID, &req, nil)
 	assert.Nil(t, err)
+	manager.AssertCalled(t, "RemoveRoleAssignment", "00000000-0000-0000-0000-000000000002")
+	manager.AssertNumberOfCalls(t, "RemoveRoleAssignment", 1)
 }
 
 func TestListPermissionsOfCurrentUser(t *testing.T) {
@@ -221,6 +246,76 @@ func TestListPermissionsOfCurrentUser(t *testing.T) {
 	err := svc.ListPermissions(ctxWithUUID, &req, &res)
 	assert.NoError(t, err)
 	assert.Len(t, res.Permissions, 3)
+
+	const (
+		self        = "61445573-4dbe-4d56-88dc-88ab47aceba7"
+		roleMissing = "00000000-0000-0000-0000-00000000dead"
+		roleY       = "00000000-0000-0000-0000-00000000000a"
+		roleZ       = "00000000-0000-0000-0000-00000000000b"
+	)
+	perm := func(name string, c settingsmsg.Permission_Constraint) *settingsmsg.Setting {
+		return &settingsmsg.Setting{
+			Name:  name,
+			Value: &settingsmsg.Setting_PermissionValue{PermissionValue: &settingsmsg.Permission{Constraint: c}},
+		}
+	}
+
+	t.Run("role that ReadBundle cannot find is skipped", func(t *testing.T) {
+		manager := &mocks.Manager{}
+		manager.On("ListRoleAssignments", self).Return([]*settingsmsg.UserRoleAssignment{
+			{AccountUuid: self, RoleId: roleMissing},
+			{AccountUuid: self, RoleId: roleY},
+		}, nil)
+		manager.On("ReadBundle", roleMissing).Return(nil, fmt.Errorf("bundleID '%s' %w", roleMissing, settings.ErrNotFound))
+		manager.On("ReadBundle", roleY).Return(&settingsmsg.Bundle{Id: roleY, Settings: []*settingsmsg.Setting{
+			perm("a", settingsmsg.Permission_CONSTRAINT_ALL),
+		}}, nil)
+		svc := Service{manager: manager}
+
+		res := v0.ListPermissionsResponse{}
+		err := svc.ListPermissions(ctxWithUUID, &v0.ListPermissionsRequest{AccountUuid: self}, &res)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"a.all"}, res.Permissions)
+	})
+
+	t.Run("duplicate roles and shared permission names are de-duplicated", func(t *testing.T) {
+		manager := &mocks.Manager{}
+		manager.On("ListRoleAssignments", self).Return([]*settingsmsg.UserRoleAssignment{
+			{AccountUuid: self, RoleId: roleY},
+			{AccountUuid: self, RoleId: roleY},
+			{AccountUuid: self, RoleId: roleZ},
+		}, nil)
+		manager.On("ReadBundle", roleY).Return(&settingsmsg.Bundle{Id: roleY, Settings: []*settingsmsg.Setting{
+			perm("a", settingsmsg.Permission_CONSTRAINT_ALL),
+			perm("shared", settingsmsg.Permission_CONSTRAINT_OWN),
+		}}, nil)
+		manager.On("ReadBundle", roleZ).Return(&settingsmsg.Bundle{Id: roleZ, Settings: []*settingsmsg.Setting{
+			perm("shared", settingsmsg.Permission_CONSTRAINT_OWN),
+			perm("b", settingsmsg.Permission_CONSTRAINT_ALL),
+		}}, nil)
+		svc := Service{manager: manager}
+
+		res := v0.ListPermissionsResponse{}
+		err := svc.ListPermissions(ctxWithUUID, &v0.ListPermissionsRequest{AccountUuid: self}, &res)
+		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"a.all", "shared.own", "b.all"}, res.Permissions)
+		// each role is read once even though roleY is assigned twice
+		manager.AssertNumberOfCalls(t, "ReadBundle", 2)
+	})
+
+	t.Run("store error other than not-found is returned", func(t *testing.T) {
+		manager := &mocks.Manager{}
+		manager.On("ListRoleAssignments", self).Return([]*settingsmsg.UserRoleAssignment{
+			{AccountUuid: self, RoleId: roleY},
+		}, nil)
+		manager.On("ReadBundle", roleY).Return(nil, errors.New("storage down"))
+		svc := Service{manager: manager}
+
+		res := v0.ListPermissionsResponse{}
+		err := svc.ListPermissions(ctxWithUUID, &v0.ListPermissionsRequest{AccountUuid: self}, &res)
+		assert.Error(t, err)
+		assert.Empty(t, res.Permissions)
+	})
 }
 
 func TestListPermissionsOfOtherUser(t *testing.T) {
