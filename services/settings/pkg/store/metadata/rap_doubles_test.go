@@ -8,7 +8,6 @@ package store
 //	fakeMDC  FAKE   working in-memory folder tree with the same NotFound semantics
 //	spyMDC   SPY    forwards to another client and records every call
 //	stubMDC  STUB   forwards to another client but returns a canned error for one op/path
-//	mockMDC  MOCK   testify mock: pre-programmed expectations, verified after the call
 //
 // The logger is a DUMMY (olog.NopLogger): it is passed because the Store needs one,
 // and no test depends on anything written to it.
@@ -26,7 +25,6 @@ import (
 	olog "github.com/opencloud-eu/opencloud/pkg/log"
 	"github.com/opencloud-eu/opencloud/services/settings/pkg/config"
 	"github.com/opencloud-eu/reva/v3/pkg/errtypes"
-	"github.com/stretchr/testify/mock"
 )
 
 // ---------------------------------------------------------------- FAKE
@@ -229,30 +227,6 @@ func (s *stubMDC) MakeDirIfNotExist(ctx context.Context, id string) error {
 		return err
 	}
 	return s.next.MakeDirIfNotExist(ctx, id)
-}
-
-// ---------------------------------------------------------------- MOCK
-
-// mockMDC is a strict testify mock: any call without an expectation fails the test.
-type mockMDC struct{ mock.Mock }
-
-func (m *mockMDC) Init(_ context.Context, id string) error { return m.Called(id).Error(0) }
-func (m *mockMDC) SimpleDownload(_ context.Context, id string) ([]byte, error) {
-	a := m.Called(id)
-	b, _ := a.Get(0).([]byte)
-	return b, a.Error(1)
-}
-func (m *mockMDC) SimpleUpload(_ context.Context, id string, c []byte) error {
-	return m.Called(id, c).Error(0)
-}
-func (m *mockMDC) Delete(_ context.Context, id string) error { return m.Called(id).Error(0) }
-func (m *mockMDC) ReadDir(_ context.Context, id string) ([]string, error) {
-	a := m.Called(id)
-	d, _ := a.Get(0).([]string)
-	return d, a.Error(1)
-}
-func (m *mockMDC) MakeDirIfNotExist(_ context.Context, id string) error {
-	return m.Called(id).Error(0)
 }
 
 // ---------------------------------------------------------------- helpers
