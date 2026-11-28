@@ -35,8 +35,38 @@ type PostprocessingService struct {
 	c       config.Postprocessing
 	tp      trace.TracerProvider
 	metrics *metrics.Metrics
+	clock   Clock
 	stopCh  chan struct{}
 	stopped atomic.Bool
+}
+
+// Clock is the source of time used by the service. It exists so the waits between publish
+// retries and before a step retry, and the timestamps used for the metrics, can be replaced
+// in tests.
+type Clock interface {
+	Now() time.Time
+	After(d time.Duration) <-chan time.Time
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time                         { return time.Now() }
+func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+
+// getClock returns the configured clock, falling back to the real one when none is set.
+func (pps *PostprocessingService) getClock() Clock {
+	if pps.clock == nil {
+		return realClock{}
+	}
+	return pps.clock
+}
+
+// acker is the part of a jetstream message the service needs. *raw.Event satisfies it. It
+// exists because raw.Event keeps its message in an unexported field, so tests could not
+// observe whether an event was acknowledged otherwise.
+type acker interface {
+	Ack() error
+	InProgress() error
 }
 
 var (
@@ -100,6 +130,7 @@ func NewPostprocessingService(ctx context.Context, logger log.Logger, sto store.
 		c:       cfg.Postprocessing,
 		tp:      tp,
 		metrics: m,
+		clock:   realClock{},
 		stopCh:  make(chan struct{}, 1),
 	}, nil
 }
@@ -168,6 +199,13 @@ func (pps *PostprocessingService) Close() {
 }
 
 func (pps *PostprocessingService) processEvent(e raw.Event) error {
+	return pps.handleEvent(e.Event, &e)
+}
+
+// handleEvent processes the payload of an event. msg is the jetstream message it came with;
+// it is acknowledged unless the event has to be redelivered.
+func (pps *PostprocessingService) handleEvent(e events.Event, msg acker) error {
+	clock := pps.getClock()
 	pps.log.Debug().Str("Type", e.Type).Str("ID", e.ID).Msg("processing event received")
 
 	var (
@@ -183,13 +221,13 @@ func (pps *PostprocessingService) processEvent(e raw.Event) error {
 	ackEvent := true
 	defer func() {
 		if ackEvent {
-			if err := e.Ack(); err != nil {
+			if err := msg.Ack(); err != nil {
 				pps.log.Error().Err(err).Msg("unable to ack event")
 			}
 		}
 	}()
 
-	switch ev := e.Event.Event.(type) {
+	switch ev := e.Event.(type) {
 	case events.BytesReceived:
 		pp = &postprocessing.Postprocessing{
 			ID:                ev.UploadID,
@@ -201,7 +239,7 @@ func (pps *PostprocessingService) processEvent(e raw.Event) error {
 			Steps:             pps.steps,
 			InitiatorID:       e.InitiatorID,
 			ImpersonatingUser: ev.ImpersonatingUser,
-			StartTime:         time.Now(),
+			StartTime:         clock.Now(),
 		}
 		pps.log.Info().Str("UploadID", ev.UploadID).Msg("processing init")
 		next = pp.Init(ev)
@@ -228,7 +266,7 @@ func (pps *PostprocessingService) processEvent(e raw.Event) error {
 			backoff := pp.BackoffDuration()
 			pps.log.Info().Str("UploadID", ev.UploadID).Str("step", string(ev.FinishedStep)).Err(ev.Error).Msg("retrying step in " + backoff.String())
 			go func() {
-				time.Sleep(backoff)
+				<-clock.After(backoff)
 				retryEvent := events.StartPostprocessingStep{
 					UploadID:          pp.ID,
 					URL:               pp.URL,
@@ -280,7 +318,7 @@ func (pps *PostprocessingService) processEvent(e raw.Event) error {
 		if ev.Failed {
 			pps.metrics.Finished.WithLabelValues("failed").Inc()
 			if !pp.StartTime.IsZero() {
-				pps.metrics.Duration.WithLabelValues("failed").Observe(time.Since(pp.StartTime).Seconds())
+				pps.metrics.Duration.WithLabelValues("failed").Observe(clock.Now().Sub(pp.StartTime).Seconds())
 			}
 			pp.Finished = true
 			return storePP(pps.store, pp)
@@ -288,7 +326,7 @@ func (pps *PostprocessingService) processEvent(e raw.Event) error {
 
 		pps.metrics.Finished.WithLabelValues("succeeded").Inc()
 		if !pp.StartTime.IsZero() {
-			pps.metrics.Duration.WithLabelValues("succeeded").Observe(time.Since(pp.StartTime).Seconds())
+			pps.metrics.Duration.WithLabelValues("succeeded").Observe(clock.Now().Sub(pp.StartTime).Seconds())
 		}
 		// the storage provider thinks the upload is done - so no need to keep it any more
 		if err := pps.store.Delete(ev.UploadID); err != nil {
@@ -311,7 +349,7 @@ func (pps *PostprocessingService) processEvent(e raw.Event) error {
 	}
 
 	if next != nil {
-		if err := pps.publishWithRetry(ctx, &e, next); err != nil {
+		if err := pps.publishWithRetry(ctx, msg, next); err != nil {
 			// The successor event never made it onto the bus. Don't ack the source event so
 			// jetstream redelivers it and the upload can continue instead of being stuck in
 			// the store forever.
@@ -336,7 +374,7 @@ func (pps *PostprocessingService) processEvent(e raw.Event) error {
 // publish, so it can be lost exactly when the event system is unhealthy. A redelivery during a
 // retry is therefore possible, it is just unlikely. If all attempts fail, the last error is
 // returned.
-func (pps *PostprocessingService) publishWithRetry(ctx context.Context, e *raw.Event, ev any) error {
+func (pps *PostprocessingService) publishWithRetry(ctx context.Context, msg acker, ev any) error {
 	for attempt := 0; ; attempt++ {
 		err := events.Publish(ctx, pps.pub, ev)
 		if err == nil {
@@ -357,7 +395,7 @@ func (pps *PostprocessingService) publishWithRetry(ctx context.Context, e *raw.E
 		pps.log.Warn().Err(err).Int("attempt", attempt+1).Dur("backoff", backoff).Msg("unable to publish event, retrying")
 
 		// tell jetstream that we are still working on the source event
-		if ipErr := e.InProgress(); ipErr != nil {
+		if ipErr := msg.InProgress(); ipErr != nil {
 			pps.log.Debug().Err(ipErr).Msg("unable to mark event as in progress")
 		}
 
@@ -366,7 +404,7 @@ func (pps *PostprocessingService) publishWithRetry(ctx context.Context, e *raw.E
 			return err
 		case <-pps.stopCh:
 			return err
-		case <-time.After(backoff):
+		case <-pps.getClock().After(backoff):
 		}
 	}
 }
